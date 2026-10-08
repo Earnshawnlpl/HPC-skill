@@ -1,10 +1,11 @@
 ---
 name: adtuner-tuning-model
 description: 给定任意 ADTuner 的 config.yaml，生成与目标输入结构同构的多负载训练数据、用采集工具（cpm/hipprof 等）采集、训练可泛化的性能模型，并通过 ADTuner runner_strategy 0/2 检验。Use when the user gives an ADTuner config.yaml (any kernel, any device) and asks to collect kernel data, train a generalizable kernel performance model, or verify model-guided ADTuner tuning. Platform- and kernel-agnostic — cluster paths live in a profile YAML.
-argument-hint: ["<path/to/config.yaml> --workdir <dir> [--profile <yaml>] [--levels 6] [--blocks 32,64,...]"]
 ---
 
 # ADTuner 调优模型构建
+
+典型输入：`<path/to/config.yaml> --workdir <dir> [--profile <yaml>] [--levels 6] [--blocks 32,64,...]`
 
 ## 适用范围
 
@@ -29,7 +30,7 @@ argument-hint: ["<path/to/config.yaml> --workdir <dir> [--profile <yaml>] [--lev
 | 情形 | 走哪条 | Phase 2/3 |
 |---|---|---|
 | 平台有 `cpm`/`hipprof` 之类的采集工具 | 本文件的标准流程 | 用 `collect.json` / `train.json` |
-| 平台**没有**采集工具，或它无法表达目标内核 | `reference/variant-adtuner-side-collection.md` | 改成 **ADTuner 侧采集**（`runner_strategy: 0` 的 cache 即数据集）+ **离线 torch→onnx 训练** |
+| 平台**没有**采集工具，或它无法表达目标内核 | `references/variant-adtuner-side-collection.md` | 改成 **ADTuner 侧采集**（`runner_strategy: 0` 的 cache 即数据集）+ **离线 torch→onnx 训练** |
 
 `profiles/mt3000.yaml`（长沙超算 MT-3000 / hthreads）就是第二种变体的完整示例。
 该变体下 Phase 0 / Phase 1 / Phase 4 的判据不变，但 §3 之后把"采集工具"
@@ -102,7 +103,7 @@ M' = problem_size   →   特征向量与 adtuner 推理时逐位相同
 > - 数组相对 `problem_size` 的**长度比例**
 > - 索引数组的**取值范围** → 访存/缓存行为
 >
-> 二者都会让模型变成分布外。实测案例见 `reference/pitfalls.md` §B（MAPE 264%）。
+> 二者都会让模型变成分布外。实测案例见 `references/pitfalls.md` §B（MAPE 264%）。
 
 ### 缩放角色（自动推断，`--roles` 可覆盖）
 
@@ -206,7 +207,7 @@ $PYPY scripts/analyze_adtuner.py <dir>/job_verify_<jobid>.out
 
 > ⚠️ 两份的 cache 文件名必须不同且跑前清空。adtuner 的 `model_predict` 优先读 cache，
 > 若 cache 里是实测值，phase-1 的"预测"就变成读实测值，**对照实验失效**。
-> 判别方法见 `reference/pitfalls.md` §I。
+> 判别方法见 `references/pitfalls.md` §I。
 
 ---
 
@@ -263,8 +264,8 @@ profile 的 `paths.adtuner_python` 通常满足。
 | `profiles/sugon8000.yaml` | 平台示例（标准流程，有 cpm） |
 | `profiles/mt3000.yaml` | 平台示例（**无 cpm 变体**） |
 | `profiles/TEMPLATE.yaml` | 新平台模板 |
-| `reference/variant-adtuner-side-collection.md` | **无采集工具时的完整替代流程**（ADTuner 侧采集 + 离线 ONNX） |
-| `reference/pitfalls.md` | 原理 + 量化案例（§L–§P 为无 cpm 变体专用） |
+| `references/variant-adtuner-side-collection.md` | **无采集工具时的完整替代流程**（ADTuner 侧采集 + 离线 ONNX） |
+| `references/pitfalls.md` | 原理 + 量化案例（§L–§P 为无 cpm 变体专用） |
 
 ---
 
@@ -289,7 +290,7 @@ $PYPY scripts/analyze_adtuner.py $W/job_verify_<jobid>.out
 > 采集换成跑 `runner_strategy: 0` 的调优作业（cache 即数据集），
 > 训练换成离线 `torch.onnx.export`（归一化与逆变换必须烘进图内），
 > 评测另配一条独立仪器。完整步骤与检查清单见
-> `reference/variant-adtuner-side-collection.md`。
+> `references/variant-adtuner-side-collection.md`。
 
 `train.json`：
 
@@ -322,7 +323,7 @@ $PYPY scripts/analyze_adtuner.py $W/job_verify_<jobid>.out
 [ ] 交付    模型 + 数据集 + 验证报告（含已知偏差）
 ```
 
-**无采集工具的变体（见 `reference/variant-adtuner-side-collection.md`）**
+**无采集工具的变体（见 `references/variant-adtuner-side-collection.md`）**
 
 ```
 [ ] 平台确实没有可用采集工具，或它无法表达目标内核

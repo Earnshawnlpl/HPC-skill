@@ -4,7 +4,7 @@
 # ⚠️ 这是**另一个流程变体**：本平台**没有 cpm**，采集必须在 ADTuner 侧完成
 #    （runner_strategy=0 的 tuning_cache），训练只能离线用 torch→onnx。
 #    因此本 skill 的 Phase 2/3 标准脚本（cpm collect / cpm train.json）**不适用**，
-#    请改用 reference/variant-adtuner-side-collection.md 的流程。
+#    请改用 references/variant-adtuner-side-collection.md 的流程。
 #    Phase 0（读 config）、Phase 1（多负载设计）、Phase 4（strategy 0/2 对照）
 #    仍然适用，只是 Phase 2 的"采集工具"换成 ADTuner 自己。
 # ============================================================================
