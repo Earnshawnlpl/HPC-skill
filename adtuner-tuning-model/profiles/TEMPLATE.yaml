@@ -1,0 +1,47 @@
+# ============================================================================
+# 平台档案模板 —— 换集群时复制本文件改名填写，不要改 scripts/ 里的代码
+# ============================================================================
+# 用法: 所有脚本都接受 --profile <本文件路径>
+# ============================================================================
+
+name: my-cluster
+description: 一句话说明（厂商/加速器/调度器）
+
+paths:
+  # cpm 与 adtuner 不一定在同一个环境里；填各自的绝对路径。
+  # 只填可执行文件即可，其余留空会用 PATH 里的同名命令。
+  cpm: /path/to/cpm
+  cpm_python: /path/to/python        # 需有 numpy/pandas（cpm 自带则与 cpm 同环境）
+  adtuner: /path/to/adtuner
+  adtuner_python: /path/to/python    # 需有 yaml/numpy/pandas/onnxruntime
+  adtuner_source: /path/to/adtuner-source   # 源码目录（排查问题时用）
+
+env:
+  # conda 初始化脚本；不使用 conda 可留空，改用 modules 或 env_exports
+  conda_sh: /path/to/etc/profile.d/conda.sh
+  cpm_env: my-cpm-env
+  adtuner_env: my-adtuner-env
+  modules:                # 采集作业需要 load 的模块
+    - compiler/xxx
+  adtuner_modules:        # adtuner 作业额外需要的模块（cmake / mpi 等）
+    - compiler/cmake/x.y.z
+  adtuner_ld_library_path: ""   # 若 adtuner 需要补充 LD_LIBRARY_PATH 就填
+
+scheduler:
+  type: slurm             # slurm | pbs | lsf | none(本地跑)
+  partition: my-partition
+  gres: gpu:1             # CUDA 平台通常是 gpu:1
+  nodes: 1
+  ntasks: 1
+  collect_time: "02:00:00"
+  verify_time: "00:30:00"
+
+# 需要额外导出的环境变量（可选）
+env_exports: {}
+# 例:
+# env_exports:
+#   OMP_NUM_THREADS: "4"
+
+kwargs:
+  # block_size 超过内核 launch bounds 时自动加 __launch_bounds__(N)；0 = 不处理
+  launch_bounds: 1024

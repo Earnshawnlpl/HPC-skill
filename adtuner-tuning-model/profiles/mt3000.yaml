@@ -1,0 +1,76 @@
+# ============================================================================
+# 平台档案：长沙超算 MT3000（国防科大 MT-3000 DSP + hthreads + SLURM）
+# ============================================================================
+# ⚠️ 这是**另一个流程变体**：本平台**没有 cpm**，采集必须在 ADTuner 侧完成
+#    （runner_strategy=0 的 tuning_cache），训练只能离线用 torch→onnx。
+#    因此本 skill 的 Phase 2/3 标准脚本（cpm collect / cpm train.json）**不适用**，
+#    请改用 reference/variant-adtuner-side-collection.md 的流程。
+#    Phase 0（读 config）、Phase 1（多负载设计）、Phase 4（strategy 0/2 对照）
+#    仍然适用，只是 Phase 2 的"采集工具"换成 ADTuner 自己。
+# ============================================================================
+
+name: mt3000
+description: 长沙超算 MT3000（MT-3000 DSP / hthreads / SLURM，无 cpm）
+
+paths:
+  # ---- 采集侧：本平台没有 cpm（留空即表示"用 adtuner 侧采集"）----
+  cpm: ""
+  cpm_python: ""
+  # ---- 调优侧 ----
+  adtuner: /vol8/home/xjtu_dxs/lpl/env_adtuner/my_env/bin/adtuner-run
+  adtuner_python: /vol8/home/xjtu_dxs/lpl/env_adtuner/my_env/bin/python
+  # editable 安装的生效源码树（**不是** 项目内的 vendor 副本，见 pitfalls §L）
+  adtuner_source: /vol8/home/xjtu_dxs/lpl/mt-adtuner
+  venv: /vol8/home/xjtu_dxs/lpl/env_adtuner/my_env
+
+env:
+  # 本平台用 venv，不用 conda
+  conda_sh: ""
+  cpm_env: ""
+  adtuner_env: ""
+  modules: []
+  adtuner_modules: []
+  # 登录侧做 DSP 宿主编译，必须有 MT_ROOT
+  mt_root: /vol8/home/xjtu_dxs/lpl/mt3000_compile_env/mt3000_programming_env
+  mpi_path: /vol8/appsoftware/mpi-x-pmi2/bin
+  # **必须**清空：projects 的 scripts/env.sh 会把 PYTHONPATH 指向 vendor/adtuner
+  force_empty_pythonpath: true
+  extra_exports:
+    UCX_TLS: "^cma"
+    UCX_MEMTYPE_CACHE: "n"
+    OPENBLAS_NUM_THREADS: "4"
+    OMP_NUM_THREADS: "4"
+
+scheduler:
+  type: slurm
+  partition: mt_module
+  gres: ""            # 无 GPU，用 DSP
+  nodes: 1
+  ntasks: 1
+  # 必须独占：DSP 编译与计时对同节点干扰敏感
+  exclusive: true
+  collect_time: "02:00:00"
+  verify_time: "00:30:00"
+
+kwargs:
+  # hthreads 内核由 DSP 编译器决定资源上限，不存在 CUDA 式 launch_bounds
+  launch_bounds: 0
+  # 启动方式：**必须**用 adtuner-run 包住 slurm 脚本，不能直接 sbatch
+  launch_wrapper: adtuner-run
+  # 单次配置评估成本（实测）：conpile 1.23 s + benchmark 0.17 s
+  seconds_per_config: 1.5
+  # 每次 adtuner-run 的固定开销（排队 + 启动 + 建缓存目录）
+  fixed_overhead_seconds: 60
+
+# 本平台特有的、脚本需要知道的事实
+mt3000:
+  kernel_lang: Hthreads
+  # hthreads 后端把宿主端编译委托给登录节点：
+  #   作业写 __ADTUNER_MT_CACHE__/start_compile.txt 并等待 compile_finish.txt，
+  #   adtuner-run（登录侧）轮询并 make，作业结束后 rmtree 该目录。
+  compile_cache_dir: __ADTUNER_MT_CACHE__
+  # 特征里没有 grid/block，第一个特征是 hthreads_num_threads（见 pitfalls §O）
+  feature_order:
+    - hthreads_num_threads
+    - workload_0..5      # inputs 顺序：M,N,K,A.nbytes,B.nbytes,C.nbytes
+    - tune_para_0..6     # tuning.parameters 键序去掉 hthreads_num_threads

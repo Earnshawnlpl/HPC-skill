@@ -1,0 +1,44 @@
+# ============================================================================
+# 平台档案：曙光8000（Hygon DCU + SLURM）
+# ============================================================================
+# 这是**示例档案**。换平台时复制本文件改名，改掉下面各字段即可，
+# 不要改 scripts/ 里的代码。
+# 用 --profile <yaml> 指定；不给时默认用本文件。
+# ============================================================================
+
+name: sugon8000
+description: 曙光8000（Hygon DCU / HIP / SLURM，GridView 调度）
+
+paths:
+  # ---- 采集/训练侧（cpm） ----
+  cpm: /public/home/acfyhftd5d/miniconda3/envs/JSJM/bin/cpm
+  cpm_python: /public/home/acfyhftd5d/miniconda3/envs/JSJM/bin/python
+  # ---- 调优侧（adtuner） ----
+  adtuner: /public/home/acfyhftd5d/miniconda3/envs/adtuner/bin/adtuner
+  adtuner_python: /public/home/acfyhftd5d/miniconda3/envs/adtuner/bin/python
+  adtuner_source: /public/home/acfyhftd5d/lpl/dcu-adtuner
+
+env:
+  conda_sh: /public/home/acfyhftd5d/miniconda3/etc/profile.d/conda.sh
+  cpm_env: JSJM
+  adtuner_env: adtuner
+  modules:
+    - compiler/dtk/25.04.2
+  adtuner_modules:
+    - compiler/cmake/3.23.3
+    - mpi/mpich/3.3.2-gcc-7.3.1
+  # adtuner 作业内需要补充的动态库路径（按本平台 python 版本调整）
+  adtuner_ld_library_path: $CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/torch/lib
+
+scheduler:
+  type: slurm
+  partition: hx1hdnormal
+  gres: dcu:1
+  nodes: 1
+  ntasks: 1
+  collect_time: "02:00:00"
+  verify_time: "00:30:00"
+
+kwargs:
+  # block_size > 256 时，给内核副本加 __launch_bounds__(N)（0 = 不处理）
+  launch_bounds: 1024
