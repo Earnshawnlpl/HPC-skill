@@ -50,3 +50,13 @@ skills/<skill-name>/SKILL.md
 ```
 
 `skill-name` 使用小写字母、数字和连字符，并与 `SKILL.md` frontmatter 中的 `name` 一致。脚本、参考资料和输出资产可分别放入该 skill 自己的 `scripts/`、`references/` 和 `assets/` 目录。
+
+### gpu-resource-scheduling
+
+为共享 GPU 任务提供短时预约、FIFO 排队、设备复核、心跳、释放和异常回收。适合调参、Profile、校准和验收任务，登记数据默认保存到 5090 的 `/data03/liupl`。
+
+主要内容
+
+- `skills/gpu-resource-scheduling/SKILL.md`：预约与排队规则
+- `skills/gpu-resource-scheduling/scripts/gpu_reservation.py`：`run`、`acquire`、`heartbeat`、`release`、`cancel` 和 `status`
+- `skills/gpu-resource-scheduling/references/`：记录格式、恢复和接入规范

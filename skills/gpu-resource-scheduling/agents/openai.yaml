@@ -1,0 +1,6 @@
+interface:
+  display_name: "GPU资源登记与排队"
+  short_description: "为共享GPU任务登记短租约并按冲突自动排队等待"
+  default_prompt: "使用 $gpu-resource-scheduling，为GPU任务登记短时资源预约，冲突时排队等待，任务结束后释放并保存审计记录。"
+policy:
+  allow_implicit_invocation: true
