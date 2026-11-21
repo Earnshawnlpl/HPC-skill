@@ -12,6 +12,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -21,6 +22,8 @@ import sys
 import threading
 import time
 import uuid
+
+import gpu_pulse
 
 
 DEFAULT_ROOT = "/data03/liupl/code-opt/gpu-reservations"
@@ -178,7 +181,7 @@ def reclaim_stale(directory: Path, stale_after: float) -> int:
 
 
 def validate_estimate(value: float, maximum: float) -> float:
-    if not isinstance(value, (int, float)) or value <= 0:
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise ValueError("estimated duration must be positive")
     if value > maximum:
         raise ValueError(f"estimated duration exceeds the configured short-lease limit of {maximum:g}s")
@@ -202,6 +205,13 @@ def create_pending(args) -> tuple[Path, Path, dict, str]:
         "token_sha256": hashlib.sha256(token.encode()).hexdigest(), "created_by": "gpu_reservation.py",
         "poll_seconds": args.poll_seconds, "stale_after_seconds": args.stale_after_seconds,
     }
+    pulse_url, pulse_id = getattr(args, "pulse_url", None), getattr(args, "pulse_gpu_id", None)
+    if pulse_url is not None or pulse_id is not None:
+        if not pulse_url or not pulse_id:
+            raise ValueError("GPU Pulse needs both --pulse-url and --pulse-gpu-id")
+        record["pulse_config"] = gpu_pulse.configuration(pulse_url, pulse_id, gpu_uuid)
+        if record["estimated_duration_s"] > DEFAULT_MAX_ESTIMATE:
+            raise ValueError("GPU Pulse reservation must be at most one hour")
     with gpu_lock(directory):
         atomic_json(directory / "pending" / f"{reservation_id}.json", record)
         event(directory, reservation_id, "registered", task_id=args.task_id, purpose=args.purpose,
@@ -228,9 +238,19 @@ def activate(args, directory: Path, record: dict, token: str) -> dict | None:
         if not readiness.get("ready"):
             atomic_json(pending_path, record)
             return None
+        if "pulse_config" in record:
+            receipt = gpu_pulse.reserve(directory, record, atomic_json)
+            record["pulse_receipt"] = receipt
+            event(directory, record["reservation_id"], "pulse_reserved", group_id=receipt["group_id"],
+                  start_ms=receipt["start_ms"], end_ms=receipt["end_ms"])
+            readiness = probe_device(record["gpu_uuid"])
+            if not readiness.get("ready") or not receipt["start_ms"] <= now() * 1000 < receipt["end_ms"]:
+                raise RuntimeError("Device readiness or GPU Pulse window changed before activation")
         activated = now()
+        deadline = (record["pulse_receipt"]["end_ms"] / 1000 if "pulse_receipt" in record
+                    else activated + record["estimated_duration_s"])
         record.update(state="active", activated_at=activated, activated_at_utc=iso(activated),
-                      expected_end_at=activated + record["estimated_duration_s"], heartbeat_at=activated,
+                      expected_end_at=deadline, heartbeat_at=activated,
                       heartbeat_at_utc=iso(activated), device_preflight=readiness)
         active_path = directory / "active" / pending_path.name
         atomic_json(active_path, record)
@@ -238,7 +258,8 @@ def activate(args, directory: Path, record: dict, token: str) -> dict | None:
         event(directory, record["reservation_id"], "activated", device_preflight=readiness)
         return {"reservation_id": record["reservation_id"], "token": token, "gpu_uuid": record["gpu_uuid"],
                 "task_id": record["task_id"], "purpose": record["purpose"], "activated_at": activated,
-                "expected_end_at": record["expected_end_at"], "device_preflight": readiness}
+                "expected_end_at": record["expected_end_at"], "device_preflight": readiness,
+                **({"expected_end_ms": record["pulse_receipt"]["end_ms"]} if "pulse_receipt" in record else {})}
 
 
 def acquire(args) -> dict:
@@ -304,6 +325,7 @@ def release(args, exit_code: int | None = None) -> dict:
             raise ValueError("active reservation was already released")
         record = json.loads(path.read_text(encoding="utf8"))
         check_token(record, args.token)
+        finish_pulse(directory, record)
         finished = now()
         record.update(state="released", released_at=finished, released_at_utc=iso(finished),
                       actual_duration_s=finished - record["activated_at"], exit_code=exit_code)
@@ -323,6 +345,7 @@ def cancel_pending(args) -> dict:
             raise ValueError("pending reservation was already canceled or activated")
         record = json.loads(path.read_text(encoding="utf8"))
         check_token(record, args.token)
+        finish_pulse(directory, record)
         canceled = now()
         record.update(state="canceled", canceled_at=canceled, canceled_at_utc=iso(canceled),
                       recovery_reason="requester_canceled_pending_request")
@@ -330,6 +353,18 @@ def cancel_pending(args) -> dict:
         path.unlink(missing_ok=True)
         event(directory, record["reservation_id"], "canceled", recovery_reason=record["recovery_reason"])
         return {"reservation_id": record["reservation_id"], "state": "canceled"}
+
+
+def finish_pulse(directory, record):
+    if "pulse_config" not in record:
+        return
+    try:
+        result = gpu_pulse.cancel(directory, record, atomic_json)
+    except (RuntimeError, OSError, ValueError):
+        event(directory, record["reservation_id"], "pulse_cleanup_unresolved")
+        raise
+    if result is not None:
+        event(directory, record["reservation_id"], "pulse_cleanup", outcome=result)
 
 
 def status(args) -> dict:
@@ -354,6 +389,8 @@ def run(args) -> int:
     command = list(args.command)
     if command and command[0] == "--":
         command.pop(0)
+    if not command:
+        raise ValueError("run requires a command after --")
     lease = acquire(args)
     token = lease.pop("token")
     stop = threading.Event()
@@ -373,8 +410,16 @@ def run(args) -> int:
     environment["SKOPA_GPU_UUID"] = lease["gpu_uuid"]
     environment["CUDA_VISIBLE_DEVICES"] = lease["gpu_uuid"]
     environment["SKOPA_GPU_RESERVATION_ID"] = lease["reservation_id"]
+    environment["SKOPA_GPU_RESERVATION_END_MS"] = str(lease.get("expected_end_ms", int(lease["expected_end_at"] * 1000)))
     heartbeat_thread = threading.Thread(target=keep_alive, name="gpu-reservation-heartbeat", daemon=True)
     try:
+        if getattr(args, "pulse_url", None):
+            active = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid, reservation_id=lease["reservation_id"])
+            directory, _, record = _load_active(active)
+            receipt = record["pulse_receipt"]
+            gpu_pulse.verify_reservation(directory, record, receipt)
+            if now() * 1000 >= receipt["end_ms"]:
+                raise RuntimeError("GPU Pulse reservation expired before the command could start")
         child = subprocess.Popen(command, env=environment, start_new_session=(os.name != "nt"))
         heartbeat_thread.start()
         code = child.wait()
@@ -388,7 +433,8 @@ def run(args) -> int:
         code = 130
     finally:
         stop.set()
-        heartbeat_thread.join(timeout=2)
+        if heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=2)
         release_args = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid,
             reservation_id=lease["reservation_id"], token=token)
         release(release_args, code if "code" in locals() else 1)
@@ -406,6 +452,8 @@ def add_common(parser: argparse.ArgumentParser, *, estimate: bool = False) -> No
         parser.add_argument("--estimate-seconds", type=float, required=True)
         parser.add_argument("--max-estimate-seconds", type=float, default=DEFAULT_MAX_ESTIMATE)
         parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL)
+        parser.add_argument("--pulse-url", help="Optional GPU Pulse HTTP(S) origin")
+        parser.add_argument("--pulse-gpu-id", help="Exact physical GPU ID on GPU Pulse")
 
 
 def parser() -> argparse.ArgumentParser:

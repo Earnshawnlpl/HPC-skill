@@ -33,6 +33,8 @@ pending → active → released
 
 token 只在 `acquire` 或 `run` 的标准输出返回一次，记录中只保存 `token_sha256`。`status`、报告和文档不能输出 token。
 
+启用 GPU Pulse 后，`pulse/<reservation_id>.json` 保存提交意图、周期和已确认的 group ID。等待、确认和取消用同一请求的客户端 ID。客户端 ID 仅放在 `pulse-private/<reservation_id>/client-id`，远端文件权限为 `0600`。公开收据使用 group ID 和状态，无需读取客户端 ID。
+
 ## 恢复与成本
 
 队列等待时间、设备锁等待时间、实际持有时间、外部进程阻塞次数、回收次数和任务退出码分别记录。不能把预约等待算作 GPU 执行时间，也不能把多个重试的租约时间覆盖成一次。中断、设备复核失败、持有者异常退出和超时都保留原记录，恢复必须创建新的激活事件并沿用原 `task_id`。
