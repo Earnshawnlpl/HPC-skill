@@ -25,6 +25,7 @@ description: Coordinate short GPU reservations for shared experiments, wait for 
 python gpu_reservation.py run \
   --root /data03/liupl/code-opt/gpu-reservations \
   --gpu-uuid GPU-ca94ba5a-1a2f-8928-b793-076fe9f6e0a4 \
+  --owner-name 刘沛灵 \
   --task-id moe150-calibration-01 \
   --purpose calibration \
   --estimate-seconds 1800 \

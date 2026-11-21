@@ -195,6 +195,7 @@ def create_pending(args) -> tuple[Path, Path, dict, str]:
     record = {
         "schema": "skopa-gpu-reservation-v1", "reservation_id": reservation_id,
         "task_id": args.task_id, "gpu_uuid": gpu_uuid, "purpose": args.purpose,
+        "owner_name": args.owner_name,
         "state": "pending", "requested_at": requested, "requested_at_utc": iso(requested),
         "estimated_duration_s": args.estimate_seconds, "requested_end_at": requested + args.estimate_seconds,
         "owner_pid": os.getpid(), "owner_start_ticks": process_start_ticks(os.getpid()),
@@ -399,6 +400,7 @@ def add_common(parser: argparse.ArgumentParser, *, estimate: bool = False) -> No
     parser.add_argument("--gpu-uuid", required=True)
     parser.add_argument("--stale-after-seconds", type=float, default=DEFAULT_STALE_AFTER)
     if estimate:
+        parser.add_argument("--owner-name", required=True)
         parser.add_argument("--task-id", required=True)
         parser.add_argument("--purpose", choices=PURPOSES, required=True)
         parser.add_argument("--estimate-seconds", type=float, required=True)

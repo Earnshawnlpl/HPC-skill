@@ -18,6 +18,7 @@ pending → active → released
 | --- | --- |
 | `reservation_id` | 随机生成的登记身份 |
 | `task_id` | 实验或控制器任务身份 |
+| `owner_name` | 登记负责人姓名 |
 | `gpu_uuid` | 物理 UUID，必须和设备查询结果一致 |
 | `purpose` | `correctness`、`tuning`、`profile`、`replay`、`integration`、`acceptance` 或 `calibration` |
 | `estimated_duration_s` | 本次登记的预计时长 |
