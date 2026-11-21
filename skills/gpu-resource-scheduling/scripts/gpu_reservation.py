@@ -24,7 +24,7 @@ import uuid
 
 
 DEFAULT_ROOT = "/data03/liupl/code-opt/gpu-reservations"
-DEFAULT_MAX_ESTIMATE = 1800
+DEFAULT_MAX_ESTIMATE = 3600
 DEFAULT_POLL = 10
 DEFAULT_STALE_AFTER = 120
 PURPOSES = ("correctness", "tuning", "profile", "replay", "integration", "acceptance", "calibration")
