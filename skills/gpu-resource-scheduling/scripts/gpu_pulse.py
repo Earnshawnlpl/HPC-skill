@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -18,6 +19,10 @@ UUID = re.compile(r"GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNOREC
 
 class PulseConflict(RuntimeError):
     """An overlapping reservation blocks activation."""
+
+
+class PulseReservationUnavailable(RuntimeError):
+    """A successfully read calendar no longer confirms the exact owned slot."""
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -105,6 +110,16 @@ def _overlap(item, intent):
             and intent["start_ms"] < item["end_ms"])
 
 
+def _fit_current_slot(intent, rows, minimum_ms):
+    overlaps = [row for row in rows if _overlap(row, intent)]
+    if not overlaps:
+        return intent
+    first = min(row["start_ms"] for row in overlaps)
+    if minimum_ms is None or first - intent["start_ms"] < minimum_ms:
+        raise PulseConflict("GPU Pulse has an overlapping reservation on the selected GPU")
+    return {**intent, "end_ms": first}
+
+
 def reserve(directory, record, write_json):
     config = record["pulse_config"]
     rid = record["reservation_id"]
@@ -128,9 +143,9 @@ def reserve(directory, record, write_json):
         if not 0 < duration_ms <= MAX_SLOT_MS:
             raise ValueError("GPU Pulse reservation must be at most one hour")
         intent = {"gpu_id": config["gpu_id"], "start_ms": start, "end_ms": start + duration_ms,
-                  "user": record["owner_name"], "title": record["task_id"], "note": "SKOPA " + rid}
-        if any(_overlap(row, intent) for row in _window(config, intent, client_id)):
-            raise PulseConflict("GPU Pulse has an overlapping reservation on the selected GPU")
+                  "user": record["owner_name"], "title": record.get("pulse_title", record["task_id"]),
+                  "note": "SKOPA " + rid}
+        intent = _fit_current_slot(intent, _window(config, intent, client_id), record.get("pulse_minimum_ms"))
         write_json(journal, intent)
         try:
             answer = request(config, "POST", "/api/reservations", body={"gpu_ids": [intent["gpu_id"]],
@@ -153,9 +168,22 @@ def verify_reservation(directory, record, receipt):
     items = _window(config, receipt, private_identity(directory, record["reservation_id"], create=False))
     rows = [row for row in items if row["group_id"] == receipt["group_id"]]
     if len(rows) != 1 or not _matching_slot(rows[0], receipt):
-        raise RuntimeError("GPU Pulse did not confirm the matching owned reservation")
+        raise PulseReservationUnavailable("GPU Pulse did not confirm the matching owned reservation")
     if any(_overlap(row, receipt) for row in items if row["group_id"] != receipt["group_id"]):
         raise PulseConflict("GPU Pulse reports a second overlapping reservation")
+
+
+def archive_attempt(directory, record, *, outcome, write_json):
+    """Keep the old POST intent after its reservation outcome is established."""
+    rid = record["reservation_id"]
+    journal = directory / "pulse" / f"{rid}.json"
+    if not journal.exists():
+        return
+    if outcome not in {"conflict_rejected", "canceled", "already_absent"}:
+        raise RuntimeError("GPU Pulse creation outcome requires reconciliation before retry")
+    attempt = json.loads(journal.read_text(encoding="utf8"))
+    write_json(directory / "pulse" / "attempts" / rid / f"{time.time_ns()}.json", {**attempt, "outcome": outcome})
+    journal.unlink()
 
 
 def cancel(directory, record, write_json):

@@ -15,6 +15,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import subprocess
@@ -30,7 +31,16 @@ DEFAULT_ROOT = "/data03/liupl/code-opt/gpu-reservations"
 DEFAULT_MAX_ESTIMATE = 3600
 DEFAULT_POLL = 10
 DEFAULT_STALE_AFTER = 120
+PULSE_WAIT_POLL = 30
 PURPOSES = ("correctness", "tuning", "profile", "replay", "integration", "acceptance", "calibration")
+
+
+class ReservationWindowEnding(RuntimeError):
+    """The active slot cannot accommodate another GPU callback."""
+
+
+class ReservationUnavailable(RuntimeError):
+    """The same local and, if configured, calendar lease could not be confirmed."""
 
 
 def now() -> float:
@@ -212,11 +222,29 @@ def create_pending(args) -> tuple[Path, Path, dict, str]:
         record["pulse_config"] = gpu_pulse.configuration(pulse_url, pulse_id, gpu_uuid)
         if record["estimated_duration_s"] > DEFAULT_MAX_ESTIMATE:
             raise ValueError("GPU Pulse reservation must be at most one hour")
+        title = getattr(args, "pulse_title", None)
+        if title is not None:
+            if not title.strip():
+                raise ValueError("GPU Pulse title must not be empty")
+            record["pulse_title"] = title.strip()
+        minimum = getattr(args, "pulse_minimum_seconds", None)
+        if minimum is not None:
+            record["pulse_minimum_ms"] = round(validate_estimate(minimum, args.estimate_seconds) * 1000)
+            if record["pulse_minimum_ms"] <= 0:
+                raise ValueError("GPU Pulse minimum duration is below one millisecond")
     with gpu_lock(directory):
         atomic_json(directory / "pending" / f"{reservation_id}.json", record)
         event(directory, reservation_id, "registered", task_id=args.task_id, purpose=args.purpose,
               estimated_duration_s=args.estimate_seconds)
     return root, directory, record, token
+
+
+def record_wait(pending_path: Path, record: dict, reason: str) -> None:
+    observed = now()
+    if record.get("last_wait_reason") != reason:
+        record["wait_reason_since"] = observed
+    record.update(last_wait_reason=reason, last_wait_at=observed)
+    atomic_json(pending_path, record)
 
 
 def activate(args, directory: Path, record: dict, token: str) -> dict | None:
@@ -232,20 +260,39 @@ def activate(args, directory: Path, record: dict, token: str) -> dict | None:
                    and (item.get("requested_at", 0), item["reservation_id"]) <
                    (record.get("requested_at", 0), record["reservation_id"])]
         if active or earlier:
+            record_wait(pending_path, record, "prior_lease")
             return None
         readiness = probe_device(record["gpu_uuid"])
         record["last_device_preflight"] = readiness
         if not readiness.get("ready"):
-            atomic_json(pending_path, record)
+            if getattr(args, "pulse_wait", False) and readiness.get("probe_error"):
+                raise RuntimeError("Unable to verify the selected GPU before Pulse reservation")
+            record_wait(pending_path, record, "device_unverified" if readiness.get("probe_error") else "device_busy")
             return None
         if "pulse_config" in record:
-            receipt = gpu_pulse.reserve(directory, record, atomic_json)
-            record["pulse_receipt"] = receipt
-            event(directory, record["reservation_id"], "pulse_reserved", group_id=receipt["group_id"],
-                  start_ms=receipt["start_ms"], end_ms=receipt["end_ms"])
-            readiness = probe_device(record["gpu_uuid"])
-            if not readiness.get("ready") or not receipt["start_ms"] <= now() * 1000 < receipt["end_ms"]:
-                raise RuntimeError("Device readiness or GPU Pulse window changed before activation")
+            wait_reason = "pulse_conflict"
+            try:
+                receipt = gpu_pulse.reserve(directory, record, atomic_json)
+                event(directory, record["reservation_id"], "pulse_reserved", group_id=receipt["group_id"],
+                      start_ms=receipt["start_ms"], end_ms=receipt["end_ms"])
+                readiness = probe_device(record["gpu_uuid"])
+                record["last_device_preflight"] = readiness
+                if readiness.get("probe_error"):
+                    raise RuntimeError("Unable to verify the selected GPU after Pulse reservation")
+                if not readiness.get("ready"):
+                    wait_reason = "device_busy"
+                    raise gpu_pulse.PulseConflict("Device readiness changed before activation")
+                if not receipt["start_ms"] <= now() * 1000 < receipt["end_ms"]:
+                    wait_reason = "pulse_window_changed"
+                    raise gpu_pulse.PulseConflict("GPU Pulse window changed before activation")
+                record["pulse_receipt"] = receipt
+            except gpu_pulse.PulseConflict:
+                if not getattr(args, "pulse_wait", False):
+                    raise
+                outcome = finish_pulse(directory, record)
+                gpu_pulse.archive_attempt(directory, record, outcome=outcome, write_json=atomic_json)
+                record_wait(pending_path, record, wait_reason)
+                return None
         activated = now()
         deadline = (record["pulse_receipt"]["end_ms"] / 1000 if "pulse_receipt" in record
                     else activated + record["estimated_duration_s"])
@@ -264,20 +311,59 @@ def activate(args, directory: Path, record: dict, token: str) -> dict | None:
 
 def acquire(args) -> dict:
     args.estimate_seconds = validate_estimate(args.estimate_seconds, args.max_estimate_seconds)
-    _, directory, record, token = create_pending(args)
+    pulse_wait = getattr(args, "pulse_wait", False)
+    eligible = getattr(args, "eligible_gpu_uuid", None)
+    poll_seconds = args.poll_seconds
+    if poll_seconds is None:
+        poll_seconds = PULSE_WAIT_POLL if pulse_wait or eligible else DEFAULT_POLL
+    if not math.isfinite(poll_seconds) or poll_seconds <= 0:
+        raise ValueError("Reservation polling interval must be positive and finite")
+    args.poll_seconds = poll_seconds
+    if eligible:
+        if getattr(args, "gpu_uuid", None) or not getattr(args, "pulse_url", None) or getattr(args, "pulse_gpu_id", None):
+            raise ValueError("Flexible mode requires --pulse-url and eligible UUIDs instead of fixed GPU flags")
+        uuids = [canonical_uuid(value) for value in eligible]
+        if len(uuids) < 2 or len(set(uuids)) != len(uuids):
+            raise ValueError("Flexible mode requires two or more distinct eligible physical GPU UUIDs")
+        for value in uuids:
+            gpu_pulse.configuration(args.pulse_url, value, value)
+        choices = [argparse.Namespace(**{**vars(args), "gpu_uuid": value, "pulse_gpu_id": value, "pulse_wait": True})
+                   for value in uuids]
+    else:
+        choices = [args]
+    if not getattr(args, "pulse_url", None) and (pulse_wait or getattr(args, "pulse_title", None) is not None
+                                                or getattr(args, "pulse_minimum_seconds", None) is not None):
+        raise ValueError("Pulse title, waiting, and minimum duration require --pulse-url")
+    pending = []
+    selected = None
     try:
+        for choice in choices:
+            _, directory, record, token = create_pending(choice)
+            pending.append((choice, directory, record, token))
         while True:
-            result = activate(args, directory, record, token)
-            if result is not None:
-                return result
-            time.sleep(args.poll_seconds)
-    except BaseException:
-        cancel_args = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid,
-                                         reservation_id=record["reservation_id"], token=token)
-        try:
-            cancel_pending(cancel_args)
-        finally:
-            raise
+            for entry in pending:
+                choice, directory, record, token = entry
+                result = activate(choice, directory, record, token)
+                if result is not None:
+                    selected = entry
+                    return result
+            time.sleep(poll_seconds)
+    finally:
+        cleanup_error = None
+        for entry in pending:
+            if entry is selected:
+                continue
+            choice, _, record, token = entry
+            try:
+                cancel_pending(argparse.Namespace(root=args.root, gpu_uuid=choice.gpu_uuid,
+                               reservation_id=record["reservation_id"], token=token))
+            except (RuntimeError, OSError, ValueError) as error:
+                cleanup_error = error
+        if cleanup_error is not None and selected is not None:
+            chosen, _, record, token = selected
+            release(argparse.Namespace(root=args.root, gpu_uuid=chosen.gpu_uuid,
+                    reservation_id=record["reservation_id"], token=token), 1)
+            raise cleanup_error
 
 
 def _load_active(args) -> tuple[Path, Path, dict]:
@@ -365,6 +451,7 @@ def finish_pulse(directory, record):
         raise
     if result is not None:
         event(directory, record["reservation_id"], "pulse_cleanup", outcome=result)
+    return result
 
 
 def status(args) -> dict:
@@ -383,6 +470,73 @@ def hide_secret(record: dict) -> dict:
     return result
 
 
+def verify_active_reservation(root, gpu_uuid, reservation_id, *, minimum_remaining_seconds=0):
+    """Read the active lease and calendar immediately before a trusted queue callback."""
+    gpu_uuid = canonical_uuid(gpu_uuid)
+    if not re.fullmatch(r"[0-9a-f]{32}", reservation_id or ""):
+        raise ValueError("Invalid GPU reservation ID")
+    if not math.isfinite(minimum_remaining_seconds) or minimum_remaining_seconds < 0:
+        raise ValueError("Minimum remaining time must be nonnegative and finite")
+    directory = gpu_directory(Path(root).expanduser().resolve(), gpu_uuid)
+    with gpu_lock(directory):
+        path = directory / "active" / f"{reservation_id}.json"
+        if not path.is_file():
+            raise ReservationUnavailable("Matching GPU reservation is not active")
+        record = json.loads(path.read_text(encoding="utf8"))
+        if (record.get("reservation_id") != reservation_id or record.get("gpu_uuid") != gpu_uuid
+                or record.get("state") not in {"active", "overdue"}
+                or not process_is_same(record["owner_pid"], record["owner_start_ticks"])):
+            raise ReservationUnavailable("Matching GPU reservation is not active")
+        receipt = record.get("pulse_receipt")
+        end_ms = receipt["end_ms"] if receipt else round(record["expected_end_at"] * 1000)
+
+        def check_window():
+            current_ms = now() * 1000
+            if (receipt and current_ms < receipt["start_ms"]) or current_ms >= end_ms:
+                raise ReservationWindowEnding("GPU reservation window is not current")
+            if end_ms - current_ms < minimum_remaining_seconds * 1000:
+                raise ReservationWindowEnding("GPU reservation has insufficient remaining time for the next callback")
+
+        check_window()
+        if "pulse_config" in record:
+            config = record["pulse_config"]
+            if not receipt or gpu_pulse.configuration(config["url"], receipt["gpu_id"], gpu_uuid) != config:
+                raise ReservationUnavailable("Active lease is missing its matching GPU Pulse receipt")
+            try:
+                gpu_pulse.verify_reservation(directory, record, receipt)
+            except gpu_pulse.PulseReservationUnavailable as error:
+                raise ReservationUnavailable(str(error)) from error
+            check_window()
+        return {"reservation_id": reservation_id, "gpu_uuid": gpu_uuid, "expected_end_ms": end_ms,
+                "pulse_verified": receipt is not None}
+
+
+def acquire_for_launch(args):
+    """Reconcile verified prelaunch refusals before acquiring another slot."""
+    wait = getattr(args, "pulse_wait", False) or getattr(args, "eligible_gpu_uuid", None)
+    while True:
+        lease = acquire(args)
+        if not getattr(args, "pulse_url", None):
+            return lease
+        release_args = argparse.Namespace(root=args.root, gpu_uuid=lease["gpu_uuid"],
+                                          reservation_id=lease["reservation_id"], token=lease["token"])
+        try:
+            verify_active_reservation(args.root, lease["gpu_uuid"], lease["reservation_id"])
+        except (ReservationWindowEnding, ReservationUnavailable, gpu_pulse.PulseConflict) as error:
+            release(release_args)
+            directory = gpu_directory(Path(args.root).expanduser().resolve(), lease["gpu_uuid"])
+            event(directory, lease["reservation_id"], "pulse_prelaunch_refused", reason=type(error).__name__,
+                  child_started=False)
+            if not wait:
+                raise
+            time.sleep(args.poll_seconds)
+        except BaseException:
+            release(release_args)
+            raise
+        else:
+            return lease
+
+
 def run(args) -> int:
     if not args.command:
         raise ValueError("run requires a command after --")
@@ -391,7 +545,7 @@ def run(args) -> int:
         command.pop(0)
     if not command:
         raise ValueError("run requires a command after --")
-    lease = acquire(args)
+    lease = acquire_for_launch(args)
     token = lease.pop("token")
     stop = threading.Event()
     child = None
@@ -399,7 +553,7 @@ def run(args) -> int:
     def keep_alive():
         while not stop.wait(max(1.0, min(args.poll_seconds, 30.0))):
             try:
-                heartbeat_args = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid,
+                heartbeat_args = argparse.Namespace(root=args.root, gpu_uuid=lease["gpu_uuid"],
                     reservation_id=lease["reservation_id"], token=token,
                     stale_after_seconds=args.stale_after_seconds)
                 heartbeat(heartbeat_args)
@@ -410,16 +564,10 @@ def run(args) -> int:
     environment["SKOPA_GPU_UUID"] = lease["gpu_uuid"]
     environment["CUDA_VISIBLE_DEVICES"] = lease["gpu_uuid"]
     environment["SKOPA_GPU_RESERVATION_ID"] = lease["reservation_id"]
+    environment["SKOPA_GPU_RESERVATION_ROOT"] = str(Path(args.root).expanduser().resolve())
     environment["SKOPA_GPU_RESERVATION_END_MS"] = str(lease.get("expected_end_ms", int(lease["expected_end_at"] * 1000)))
     heartbeat_thread = threading.Thread(target=keep_alive, name="gpu-reservation-heartbeat", daemon=True)
     try:
-        if getattr(args, "pulse_url", None):
-            active = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid, reservation_id=lease["reservation_id"])
-            directory, _, record = _load_active(active)
-            receipt = record["pulse_receipt"]
-            gpu_pulse.verify_reservation(directory, record, receipt)
-            if now() * 1000 >= receipt["end_ms"]:
-                raise RuntimeError("GPU Pulse reservation expired before the command could start")
         child = subprocess.Popen(command, env=environment, start_new_session=(os.name != "nt"))
         heartbeat_thread.start()
         code = child.wait()
@@ -435,7 +583,7 @@ def run(args) -> int:
         stop.set()
         if heartbeat_thread.is_alive():
             heartbeat_thread.join(timeout=2)
-        release_args = argparse.Namespace(root=args.root, gpu_uuid=args.gpu_uuid,
+        release_args = argparse.Namespace(root=args.root, gpu_uuid=lease["gpu_uuid"],
             reservation_id=lease["reservation_id"], token=token)
         release(release_args, code if "code" in locals() else 1)
     return code
@@ -443,17 +591,24 @@ def run(args) -> int:
 
 def add_common(parser: argparse.ArgumentParser, *, estimate: bool = False) -> None:
     parser.add_argument("--root", default=DEFAULT_ROOT)
-    parser.add_argument("--gpu-uuid", required=True)
     parser.add_argument("--stale-after-seconds", type=float, default=DEFAULT_STALE_AFTER)
     if estimate:
+        gpu_selection = parser.add_mutually_exclusive_group(required=True)
+        gpu_selection.add_argument("--gpu-uuid")
+        gpu_selection.add_argument("--eligible-gpu-uuid", action="append", help="Physical UUID for a flexible development task. Repeat for each candidate.")
         parser.add_argument("--owner-name", required=True)
         parser.add_argument("--task-id", required=True)
         parser.add_argument("--purpose", choices=PURPOSES, required=True)
         parser.add_argument("--estimate-seconds", type=float, required=True)
         parser.add_argument("--max-estimate-seconds", type=float, default=DEFAULT_MAX_ESTIMATE)
-        parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL)
+        parser.add_argument("--poll-seconds", type=float, help="Wait interval in seconds. Defaults to 30 in Pulse wait mode.")
         parser.add_argument("--pulse-url", help="Optional GPU Pulse HTTP(S) origin")
         parser.add_argument("--pulse-gpu-id", help="Exact physical GPU ID on GPU Pulse")
+        parser.add_argument("--pulse-title", help="Public calendar title (defaults to task ID)")
+        parser.add_argument("--pulse-wait", action="store_true", help="Wait and retry verified readiness or calendar conflicts")
+        parser.add_argument("--pulse-minimum-seconds", type=float, help="Allow shorter available calendar windows down to this minimum")
+    else:
+        parser.add_argument("--gpu-uuid", required=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -475,6 +630,10 @@ def parser() -> argparse.ArgumentParser:
     cancel_parser.add_argument("--token", required=True)
     status_parser = commands.add_parser("status")
     add_common(status_parser)
+    check_parser = commands.add_parser("check")
+    add_common(check_parser)
+    check_parser.add_argument("--reservation-id", required=True)
+    check_parser.add_argument("--minimum-remaining-seconds", type=float, default=0)
     run_parser = commands.add_parser("run")
     add_common(run_parser, estimate=True)
     run_parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -493,6 +652,9 @@ def main(argv: list[str] | None = None) -> int:
         result = cancel_pending(args)
     elif args.command_name == "status":
         result = status(args)
+    elif args.command_name == "check":
+        result = verify_active_reservation(args.root, args.gpu_uuid, args.reservation_id,
+                                           minimum_remaining_seconds=args.minimum_remaining_seconds)
     else:
         return run(args)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

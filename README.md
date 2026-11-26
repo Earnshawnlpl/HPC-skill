@@ -53,7 +53,7 @@ skills/<skill-name>/SKILL.md
 
 ### gpu-resource-scheduling
 
-为共享 GPU 任务提供短时预约、FIFO 排队、设备复核、心跳、释放和异常回收。适合调参、Profile、校准和验收任务，登记数据默认保存到 5090 的 `/data03/liupl`。
+在 CPU 上准备并核验调参、Profile、校准或验收批次。批次就绪后才预约 GPU，遇到占用或冲突时排队等待，设备工作结束后及时释放。单次预约最多一小时，登记数据默认保存到 5090 的 `/data03/liupl`。
 
 主要内容
 
