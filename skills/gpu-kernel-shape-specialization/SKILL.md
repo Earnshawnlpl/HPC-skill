@@ -9,6 +9,8 @@ description: Design and implement shape-specialized GPU kernels. Use for structu
 
 仅获设计授权时，依据已有证据准备候选矩阵并标记待测。编译及设备实测按本项目授权执行。
 
+目标架构变化时，先读[平台适配](../gpu-kernel-platform-porting/SKILL.md)。复用算子与逻辑任务，针对本机编译和可验证能力重写代码、guard 及合法池。合法未命中优先走已验证的目标设备通用入口，各类后备在收据中标清实际物理路径。
+
 ## 输入与交付
 
 - **输入**包括算子契约、目标及有序元数据、当前入口与保留配置、独立参考、实际环境和接纳政策。

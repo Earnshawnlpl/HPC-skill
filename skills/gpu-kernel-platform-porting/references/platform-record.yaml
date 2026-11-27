@@ -1,0 +1,51 @@
+# Replace null values only with project evidence and supported configurations.
+platform:
+  architecture: null
+  target_isa: null
+  model: null
+  physical_device_ref: null
+  host_abi: null
+  os: null
+  sdk: null
+  driver: null
+  firmware: null
+  compiler: null
+  runtime: null
+  device_libraries: []
+  toolchain_evidence: []
+  build_recipe_ref: null
+  measurement_environment_ref: null
+route:
+  build_kind: null  # native-sdk, portable-codegen, or versioned-compatibility
+  actual_execution_device: null
+  runtime_backend: null
+  dependency_and_binary_evidence: []
+contract_and_reference:
+  contract_ref: null
+  input_structure_manifest_ref: null
+  reference_ref: null
+  reference_tolerance_ref: null
+  local_generic_ref: null
+  local_baseline_ref: null
+  legal_fallback_ref: null
+capabilities:
+  - feature: required-dtype-and-accumulation
+    requirement: required
+    status: unknown
+    document_or_probe_refs: []
+  - feature: optional-matrix-primitive
+    requirement: optional
+    status: unknown
+    document_or_probe_refs: []
+measurements:
+  device_timer_ref: null
+  complete_entry_policy_ref: null
+  profiler_counter_refs: []
+  target_model_admission_ref: null
+gates:
+  P0: {status: pending, receipts: []}
+  P1: {status: pending, receipts: []}
+  P2: {status: pending, receipts: []}
+  P3: {status: pending, receipts: []}
+  P4: {status: pending, receipts: []}
+  P5: {status: pending, receipts: []}

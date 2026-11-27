@@ -1,6 +1,6 @@
 ---
 name: gpu-kernel-optimization-workflow
-description: Coordinate a GPU kernel optimization study across workload design, experience, cost modeling, specialization, actual tuning, independent evaluation, and ablations. Use for end-to-end planning, implementation, execution, or audit across these stages.
+description: Coordinate a GPU kernel optimization study across platform porting, workload design, experience, cost modeling, specialization, actual tuning, independent evaluation, and ablations. Use for end-to-end planning, implementation, execution, or audit across these stages.
 ---
 
 # GPU Kernel 优化总控
@@ -11,6 +11,7 @@ description: Coordinate a GPU kernel optimization study across workload design, 
 
 | 阶段 | 子 Skill | 交给下阶段的内容 |
 |---|---|---|
+| 新设备或加速器移植 | [平台适配](../gpu-kernel-platform-porting/SKILL.md) | 本机能力、真实派发、通用实现与基线。特化及验收按本平台重新建立 |
 | 契约、负载与基线 | [负载设计](../gpu-kernel-workload-design/SKILL.md) | 可重建结构、独立参考、实际共同起点和强基线 |
 | 获取或沉淀机制 | [专家经验](../gpu-kernel-experience/SKILL.md) | 可见快照、适用条件、反例与复用候选 |
 | 预测、诊断与搜索次序 | [硬件成本模型](../gpu-kernel-cost-model/SKILL.md) | 绑定真实分支的执行图、支持域、未知项和选择依据 |
@@ -21,6 +22,8 @@ description: Coordinate a GPU kernel optimization study across workload design, 
 | 实验控制与成本 | [消融研究](../gpu-kernel-ablation-study/SKILL.md) | 匹配的比较组、结论范围、可审计的耗时与用量 |
 
 可按任务直接调用子 Skill。若对整个流程有授权，先登记比较组和预算，再冻结负载。共同起点和真实基线通过后开展 O。O 每轮把特化设计、实际搜索和独立复测连起来，局部接纳后回归统一入口。T 在统一入口上给已冻结的代码和分派选参。A 在所有方法冻结后独立执行。模型、经验、剪枝根据研究问题有条件启用。
+
+目标平台变化时，在开展专用分支 O 前完成本平台适配的 P0–P2。原架构可提供契约、结构、机制假设和参考，目标机的合法配置、真实基线、模型及性能证据分别重新绑定。用 P3–P5 的收据界定特化和整套支持范围。
 
 ## 主模型的阶段决策
 
